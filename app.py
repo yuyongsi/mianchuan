@@ -10,6 +10,7 @@
   3. 晚上到设定时间，程序自动 -晚间分
   4. 事件按钮：点一下记一笔（正数 = 注水，负数 = 放水）
   5. 日历格子的右上角显示"晚间扣减前"的当日分数
+  6. 花销：首页逐条记今日花销（不参与积分）；日历下方按钮可按任意日期区间统计总花销与明细
 
 数据保存在同目录下的 data.json（可随时手动改）
 依赖：pip install pyside6
@@ -26,7 +27,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QCalendarWidget, QListWidget, QListWidgetItem, QLineEdit, QSpinBox,
     QDialog, QDialogButtonBox, QFormLayout, QTimeEdit, QMessageBox, QComboBox, QTextEdit,
-    QFileDialog, QColorDialog, QSlider,
+    QFileDialog, QColorDialog, QSlider, QDoubleSpinBox, QDateEdit,
 )
 
 # ---------------------------------------------------------------------------
@@ -102,6 +103,10 @@ def load_data():
         data.setdefault("tags", [dict(t) for t in DEFAULT_TAGS])
         data.setdefault("days", {})
         data.setdefault("one_time", [])
+        for d in data["days"].values():
+            d.setdefault("events", [])
+            d.setdefault("timers", [])
+            d.setdefault("expenses", [])
         return data
     data = {
         "config": dict(DEFAULT_CONFIG),
@@ -130,7 +135,7 @@ def ensure_today(data):
     key = date_key()
     if key not in data["days"]:
         data["days"][key] = {"morning_done": False, "night_done": False,
-                             "events": [], "timers": []}
+                             "events": [], "timers": [], "expenses": []}
     return key
 
 
@@ -286,7 +291,7 @@ class DayDetailDialog(QDialog):
         day = data["days"].get(key)
         has_record = bool(day and (
             day.get("morning_done") or day.get("night_done") or day.get("events")
-            or day.get("timers") or day.get("steps")))
+            or day.get("timers") or day.get("steps") or day.get("expenses")))
 
         lay = QVBoxLayout(self)
 
@@ -303,6 +308,9 @@ class DayDetailDialog(QDialog):
             st = day.get("steps")
             if st:
                 rows.append(f"{st['t']}　今日步数 {st['count']}　{st['value']:+d}")
+            for ex in day.get("expenses", []):
+                note = f"　{ex['note']}" if ex.get("note") else ""
+                rows.append(f"{ex['t']}　花销{note}　¥{ex['amount']:.2f}")
             if day.get("night_done"):
                 rows.append(f"{cfg['night_time']}　晚间清零")
         else:
@@ -345,6 +353,100 @@ class DayDetailDialog(QDialog):
         day["note_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
         save_data(self.data)
         self.time_label.setText(f"上次修改：{day['note_updated']}")
+
+
+# ---------------------------------------------------------------------------
+# 花销统计窗口（查询任意日期区间的总花销与明细）
+# ---------------------------------------------------------------------------
+class ExpenseStatsDialog(QDialog):
+    def __init__(self, data, parent=None):
+        super().__init__(parent)
+        self.data = data
+        self.setWindowTitle("💰 花销统计")
+        self.setMinimumSize(430, 480)
+        today = QDate.currentDate()
+        first = QDate(today.year(), today.month(), 1)
+
+        lay = QVBoxLayout(self)
+
+        # 日期区间
+        form = QHBoxLayout()
+        form.addWidget(QLabel("从"))
+        self.start_date = QDateEdit(first)
+        self.start_date.setCalendarPopup(True)
+        self.start_date.setDisplayFormat("yyyy-MM-dd")
+        form.addWidget(self.start_date)
+        form.addWidget(QLabel("到"))
+        self.end_date = QDateEdit(today)
+        self.end_date.setCalendarPopup(True)
+        self.end_date.setDisplayFormat("yyyy-MM-dd")
+        form.addWidget(self.end_date)
+        self.btn_query = QPushButton("查询")
+        self.btn_query.clicked.connect(self.query)
+        form.addWidget(self.btn_query)
+        lay.addLayout(form)
+
+        self.total_label = QLabel()
+        self.total_label.setObjectName("exp_total")
+        lay.addWidget(self.total_label)
+
+        self.list = QListWidget()
+        self.list.itemDoubleClicked.connect(lambda _: self.delete_selected())
+        lay.addWidget(self.list, 1)
+
+        bottom = QHBoxLayout()
+        self.btn_del = QPushButton("🗑 删除选中")
+        self.btn_del.clicked.connect(self.delete_selected)
+        bottom.addWidget(self.btn_del)
+        hint = QLabel("双击条目也可删除")
+        hint.setStyleSheet("color:#999999; font-size:11px;")
+        bottom.addWidget(hint)
+        bottom.addStretch(1)
+        close_box = QDialogButtonBox(QDialogButtonBox.Close)
+        close_box.rejected.connect(self.reject)
+        bottom.addWidget(close_box)
+        lay.addLayout(bottom)
+
+        self.query()
+
+    def query(self):
+        s = self.start_date.date().toString("yyyy-MM-dd")
+        e = self.end_date.date().toString("yyyy-MM-dd")
+        self.list.clear()
+        if s > e:
+            self.total_label.setText("⚠️ 起始日期不能晚于结束日期")
+            return
+        total = 0.0
+        count = 0
+        for key in sorted(self.data["days"].keys()):
+            if not (s <= key <= e):
+                continue
+            for idx, ex in enumerate(self.data["days"][key].get("expenses", [])):
+                total += ex.get("amount", 0)
+                count += 1
+                note = f"　{ex['note']}" if ex.get("note") else ""
+                item = QListWidgetItem(f"{key}  {ex['t']}{note}　¥{ex['amount']:.2f}")
+                item.setData(Qt.UserRole, (key, idx))
+                self.list.addItem(item)
+        self.total_label.setText(f"总花销 ¥{total:.2f}　（{count} 笔）")
+
+    def delete_selected(self):
+        item = self.list.currentItem()
+        if item is None:
+            return
+        key, idx = item.data(Qt.UserRole)
+        exps = self.data["days"].get(key, {}).get("expenses", [])
+        if not (0 <= idx < len(exps)):
+            return
+        ex = exps[idx]
+        note = f"「{ex['note']}」" if ex.get("note") else ""
+        ret = QMessageBox.question(
+            self, "删除花销", f"删除 {key} {ex['t']} {note} ¥{ex['amount']:.2f} ？")
+        if ret != QMessageBox.Yes:
+            return
+        del exps[idx]
+        save_data(self.data)
+        self.query()
 
 
 # ---------------------------------------------------------------------------
@@ -539,8 +641,8 @@ class MainWindow(QMainWindow):
         ic = get_icon_path()
         if ic:
             self.setWindowIcon(QIcon(ic))
-        self.resize(470, 725)
-        self.setMinimumSize(440, 660)
+        self.resize(470, 830)
+        self.setMinimumSize(440, 720)
         # 计时状态
         self._timer_running = False   # 是否在计时中（含暂停）
         self._timer_begin = None      # 开始时间 datetime
@@ -653,6 +755,35 @@ class MainWindow(QMainWindow):
         step_row.addWidget(self.step_score_label, 1)
         root.addLayout(step_row)
 
+        # 今日花销
+        exp_header = QHBoxLayout()
+        exp_title = QLabel("💰 今日花销"); exp_title.setObjectName("exp_title")
+        self.expense_total_label = QLabel(); self.expense_total_label.setObjectName("expense_total")
+        exp_header.addWidget(exp_title)
+        exp_header.addStretch(1)
+        exp_header.addWidget(self.expense_total_label)
+        root.addLayout(exp_header)
+
+        self.expense_list = QListWidget()
+        self.expense_list.setMaximumHeight(78)
+        self.expense_list.itemDoubleClicked.connect(self.on_expense_double_clicked)
+        root.addWidget(self.expense_list)
+
+        exp_row = QHBoxLayout()
+        self.expense_amount = QDoubleSpinBox()
+        self.expense_amount.setRange(0, 999999)
+        self.expense_amount.setDecimals(2)
+        self.expense_amount.setPrefix("¥")
+        self.expense_amount.setMaximumWidth(100)
+        exp_row.addWidget(self.expense_amount)
+        self.expense_note = QLineEdit(); self.expense_note.setPlaceholderText("备注，如 午饭")
+        self.expense_note.returnPressed.connect(self.record_expense)
+        exp_row.addWidget(self.expense_note, 1)
+        self.btn_add_expense = QPushButton("记花销")
+        self.btn_add_expense.clicked.connect(self.record_expense)
+        exp_row.addWidget(self.btn_add_expense)
+        root.addLayout(exp_row)
+
         # 底部操作按钮（右侧放计时结束）
         row = QHBoxLayout()
         self.btn_set = QPushButton("⚙️ 设置"); self.btn_set.clicked.connect(self.open_settings)
@@ -672,6 +803,10 @@ class MainWindow(QMainWindow):
         self.calendar.currentPageChanged.connect(self._update_cal_ym)
         self._update_cal_ym(self.calendar.yearShown(), self.calendar.monthShown())
         root.addWidget(self.calendar)
+
+        self.btn_expense_stats = QPushButton("💰 花销统计（按日期区间）")
+        self.btn_expense_stats.clicked.connect(self.open_expense_stats)
+        root.addWidget(self.btn_expense_stats)
 
         self.setStyleSheet(APP_QSS)
 
@@ -865,6 +1000,61 @@ class MainWindow(QMainWindow):
         else:
             self.step_score_label.setText("")
 
+    # ---- 今日花销 ----
+    def record_expense(self):
+        """记一笔今日花销（一条条累加，不参与积分）。"""
+        amount = round(self.expense_amount.value(), 2)
+        if amount <= 0:
+            self.status_label.setText("⚠️ 请输入大于 0 的花销金额")
+            QTimer.singleShot(3000, self.refresh_all)
+            return
+        note = self.expense_note.text().strip()
+        key = ensure_today(self.data)
+        self.data["days"][key].setdefault("expenses", []).append({
+            "t": datetime.now().strftime("%H:%M"),
+            "amount": amount,
+            "note": note,
+        })
+        save_data(self.data)
+        self.expense_amount.setValue(0)
+        self.expense_note.clear()
+        self.refresh_all()
+
+    def refresh_expenses(self, day):
+        self.expense_list.clear()
+        exps = day.get("expenses", [])
+        for ex in exps:
+            note = f"　{ex['note']}" if ex.get("note") else ""
+            self.expense_list.addItem(f"{ex['t']}{note}　¥{ex['amount']:.2f}")
+        total = sum(ex.get("amount", 0) for ex in exps)
+        self.expense_total_label.setText(f"合计 ¥{total:.2f}" if exps else "")
+
+    def on_expense_double_clicked(self, item):
+        row = self.expense_list.row(item)
+        key = date_key()
+        exps = self.data["days"].get(key, {}).get("expenses", [])
+        if not (0 <= row < len(exps)):
+            return
+        ex = exps[row]
+        note = f"「{ex['note']}」" if ex.get("note") else ""
+        ret = QMessageBox.question(
+            self, "删除花销", f"删除 {ex['t']} {note} ¥{ex['amount']:.2f} ？")
+        if ret != QMessageBox.Yes:
+            return
+        QTimer.singleShot(0, lambda: self._delete_expense(key, row))
+
+    def _delete_expense(self, key, row):
+        exps = self.data["days"].get(key, {}).get("expenses", [])
+        if 0 <= row < len(exps):
+            del exps[row]
+            save_data(self.data)
+            self.refresh_all()
+
+    def open_expense_stats(self):
+        dlg = ExpenseStatsDialog(self.data, self)
+        dlg.exec()
+        self.refresh_all()
+
     def paintEvent(self, event):
         """绘制主窗口背景：图片(等比铺满+遮罩) 或纯色。"""
         painter = QPainter(self)
@@ -942,6 +1132,7 @@ class MainWindow(QMainWindow):
         self.refresh_log(key, day)
         self.refresh_ot()
         self._refresh_step_display(day)
+        self.refresh_expenses(day)
         self.refresh_calendar()
 
     def refresh_log(self, key, day):
@@ -999,6 +1190,9 @@ QLabel#date  { font-size: 12px; color: #666; background: transparent; }
 QLabel#score { font-size: 46px; font-weight: bold; background: transparent; }
 QLabel#status{ font-size: 12px; color: #555; background: transparent; }
 QLabel#ot_title { font-size: 13px; font-weight: bold; color: #555; background: transparent; }
+QLabel#exp_title { font-size: 13px; font-weight: bold; color: #555; background: transparent; }
+QLabel#expense_total { font-size: 13px; font-weight: bold; color: #b45309; background: transparent; }
+QLabel#exp_total { font-size: 14px; font-weight: bold; color: #b45309; background: transparent; padding: 4px 0; }
 QLabel#cal_ym { font-size: 15px; font-weight: bold; color: #333333; background: transparent; padding: 4px 0; }
 QLabel#timer_label { font-size: 18px; font-weight: bold; color: #1d4ed8; background: transparent; }
 QLabel#step_score { font-size: 13px; font-weight: bold; color: #b45309; background: transparent; }
