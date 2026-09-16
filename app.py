@@ -22,7 +22,7 @@ import sys
 from datetime import datetime, timedelta
 
 from PySide6.QtCore import QDate, QTime, Qt, QTimer, QRect, QPoint
-from PySide6.QtGui import QColor, QFont, QPainter, QPixmap, QIcon, QPalette, QTextCharFormat, QBrush
+from PySide6.QtGui import QColor, QFont, QPainter, QPixmap, QIcon, QPalette, QTextCharFormat, QBrush, QDoubleValidator
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QCalendarWidget, QListWidget, QListWidgetItem, QLineEdit, QSpinBox,
@@ -770,11 +770,11 @@ class MainWindow(QMainWindow):
         root.addWidget(self.expense_list)
 
         exp_row = QHBoxLayout()
-        self.expense_amount = QDoubleSpinBox()
-        self.expense_amount.setRange(0, 999999)
-        self.expense_amount.setDecimals(2)
-        self.expense_amount.setPrefix("¥")
+        self.expense_amount = QLineEdit()
+        self.expense_amount.setPlaceholderText("金额")
+        self.expense_amount.setValidator(QDoubleValidator(0.0, 999999.0, 2, self.expense_amount))
         self.expense_amount.setMaximumWidth(100)
+        self.expense_amount.returnPressed.connect(self.record_expense)
         exp_row.addWidget(self.expense_amount)
         self.expense_note = QLineEdit(); self.expense_note.setPlaceholderText("备注，如 午饭")
         self.expense_note.returnPressed.connect(self.record_expense)
@@ -1003,7 +1003,17 @@ class MainWindow(QMainWindow):
     # ---- 今日花销 ----
     def record_expense(self):
         """记一笔今日花销（一条条累加，不参与积分）。"""
-        amount = round(self.expense_amount.value(), 2)
+        text = self.expense_amount.text().strip()
+        if not text:
+            self.status_label.setText("⚠️ 请输入花销金额")
+            QTimer.singleShot(3000, self.refresh_all)
+            return
+        try:
+            amount = round(float(text), 2)
+        except ValueError:
+            self.status_label.setText("⚠️ 金额必须是数字")
+            QTimer.singleShot(3000, self.refresh_all)
+            return
         if amount <= 0:
             self.status_label.setText("⚠️ 请输入大于 0 的花销金额")
             QTimer.singleShot(3000, self.refresh_all)
@@ -1016,7 +1026,7 @@ class MainWindow(QMainWindow):
             "note": note,
         })
         save_data(self.data)
-        self.expense_amount.setValue(0)
+        self.expense_amount.clear()
         self.expense_note.clear()
         self.refresh_all()
 
